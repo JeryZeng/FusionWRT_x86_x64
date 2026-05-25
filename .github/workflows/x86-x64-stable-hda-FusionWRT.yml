@@ -1,0 +1,126 @@
+name: x86-x64-stable-hda-FusionWRT
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/x86-x64-stable-hda-FusionWRT.yml'
+      - 'configs/lean/lean_stable.config'
+
+env:
+  REPO_URL: https://github.com/coolsnowwolf/lede
+  REPO_BRANCH: master
+  CONFIG_FILE: configs/lean/lean_stable.config
+  DIY_SH: scripts/lean.sh
+  IPV6MOD_IN_FIRMWARE: true
+  KMODS_IN_FIRMWARE: true
+  TZ: Asia/Shanghai
+
+jobs:
+  build:
+    runs-on: ubuntu-20.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Initialization Environment
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          sudo -E apt-get -qq update
+          sudo -E apt-get -qq install $(curl -fsSL git.io/depends-ubuntu-2004) tree
+          sudo apt-get -y install python3 git-core curl
+          sudo -E apt-get -qq autoremove --purge
+          sudo -E apt-get -qq clean
+          sudo timedatectl set-timezone "$TZ"
+
+      - name: Clone Source Code
+        run: |
+          df -hT "$PWD"
+          git config --global user.email "git@github.com"
+          git config --global user.name "GitHub"
+          git clone "$REPO_URL" -b "$REPO_BRANCH" openwrt
+
+      - name: Cache
+        uses: klever1988/cachewrtbuild@main
+        with:
+          ccache: 'true'
+          prefix: ${{ github.workspace }}/openwrt
+
+      - name: Update Feeds
+        run: |
+          cd openwrt
+          mkdir customfeeds
+          git clone --depth=1 https://github.com/coolsnowwolf/packages customfeeds/packages
+          git clone --depth=1 https://github.com/coolsnowwolf/luci customfeeds/luci
+          chmod +x ../scripts/*.sh
+          ../scripts/hook-feeds.sh
+
+      - name: MOD index file
+        run: |
+          cd openwrt/package/lean/autocore/files/x86
+          sed -i '/Load Average/i\\t\t<tr><td width="33%"><%:Telegram %></td><td><a href="https://t.me/DHDAXCW"><%:电报交流群%></a></td></tr>' index.htm
+
+      - name: Install Feeds
+        run: |
+          cd openwrt
+          ./scripts/feeds install -a
+
+      - name: Load Custom Configuration
+        run: |
+          [ -e files ] && mv files openwrt/files
+          [ -e "$CONFIG_FILE" ] && cp "$CONFIG_FILE" openwrt/.config
+          chmod +x scripts/*.sh
+          cd openwrt
+          ../$DIY_SH
+          ../scripts/preset-clash-core.sh amd64
+          ../scripts/preset-terminal-tools.sh
+          make defconfig
+
+      - name: Download Package
+        run: |
+          cd openwrt
+          if "$KMODS_IN_FIRMWARE" = 'true'; then
+            echo "CONFIG_ALL_NONSHARED=y" >> .config
+          fi
+          ../scripts/modify_config.sh
+          cat .config
+          make download -j8
+          find dl -size -1024c -exec ls -l {} \;
+          find dl -size -1024c -exec rm -f {} \;
+
+      - name: Compile Packages
+        run: |
+          cd openwrt
+          echo -e "$(nproc) thread compile"
+          make tools/compile -j$(nproc) || make tools/compile -j1 V=s
+          make toolchain/compile -j$(nproc) || make toolchain/compile -j1 V=s
+          make target/compile -j$(nproc) || make target/compile -j1 V=s IGNORE_ERRORS=1
+          make diffconfig
+          make package/compile -j$(nproc) IGNORE_ERRORS=1 || make package/compile -j1 V=s IGNORE_ERRORS=1
+          make package/index
+
+      - name: Generate Firmware
+        run: |
+          cd openwrt
+          mkdir -p files/etc/uci-defaults/
+          cp ../scripts/init-settings.sh files/etc/uci-defaults/99-init-settings
+          mkdir -p files/etc/opkg
+          cp ../configs/opkg/distfeeds-packages-server.conf files/etc/opkg/distfeeds.conf.server
+          make package/install -j$(nproc) || make package/install -j1 V=s
+          make target/install -j$(nproc) || make target/install -j1 V=s
+          make checksum
+
+      - name: Verify HDA Packages
+        run: |
+          find openwrt/bin -name 'kmod-sound-hda-intel_*' -o -name 'kmod-sound-hda-core_*' -o -name 'kmod-sound-hda-codec-realtek_*' -o -name 'kmod-sound-hda-codec-hdmi_*'
+          find openwrt/bin/targets -maxdepth 4 -type f | sort
+
+      - name: Upload Firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: fusionwrt-x86-64-stable-hda-bin
+          path: openwrt/bin

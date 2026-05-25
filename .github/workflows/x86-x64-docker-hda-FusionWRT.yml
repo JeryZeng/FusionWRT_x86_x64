@@ -2,6 +2,12 @@ name: x86-x64-docker-hda-FusionWRT
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/x86-x64-docker-hda-FusionWRT.yml'
+      - 'configs/lean/lean_docker.config'
 
 env:
   REPO_URL: https://github.com/coolsnowwolf/lede
